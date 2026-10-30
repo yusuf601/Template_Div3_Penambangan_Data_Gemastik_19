@@ -94,7 +94,7 @@ Dataclass. Modalitas lain men-subclass (`TabularConfig`, `ImageConfig`, `TextCon
 | `refit_iter_mult` | `float` | `1.1` | Pengali rata-rata `best_iteration` antar fold untuk `refit_full` (GBDT) |
 | `runs_dir` | `str` | `"runs"` | Root folder run |
 | `save_models` | `bool` | `False` | Simpan checkpoint per fold |
-| `debug` | `bool` | `False` | Subsample data + 2 fold untuk smoke test cepat |
+| `debug` | `bool` | `False` | Subsample data + 2 fold untuk smoke test cepat; mengabaikan `folds_path`, menulis ke `runs/_debug/`, dan tidak menambah `leaderboard.csv` |
 | `notes` | `str` | `""` | Ditulis ke `notes.md` |
 | `extra` | `dict` | `{}` | Bebas, untuk parameter custom user |
 
@@ -106,6 +106,7 @@ Method:
     2. selain itu → `stratified` (binary/multiclass) / `kfold` (regression).
     3. `timeseries` **tidak pernah** dipilih otomatis. Jika `time_col` diisi tapi hasil resolve bukan `timeseries` → warning: set `cv_strategy="timeseries"` eksplisit bila memang time series.
   - `test_mode is None` → `refit_full` jika `cv_strategy == "timeseries"`, selain itu `fold_avg`. `fold_avg` tetap bisa dipilih eksplisit untuk timeseries.
+  - `debug is True` → paksa `n_folds = 2`; jika `folds_path` diisi, reset `folds_path = None` dan log alasan (karena subsample mengubah set id dan `ids_target_hash`).
 - `validate()` — dipanggil setelah `resolve()`; raise `ValueError` jika kombinasi invalid (mis. `cv_strategy="group"` tanpa `group_col`, `task="regression"` dengan `stratified`/`stratified_group`, `timeseries` tanpa `time_col`, `n_folds < 2`, metric tidak dikenal).
 
 **Multi-seed** bukan fitur khusus: jika perlu, jalankan beberapa run dengan `seed` berbeda dan `fold_seed` sama, lalu blend.
@@ -156,10 +157,13 @@ Dua hash dengan peran berbeda:
 
 **Hash kanonik** (`io.canonical_hash(df, cols, sort_by)`), supaya urutan baris dan perbedaan dtype tidak menimbulkan mismatch palsu:
 1. Ambil hanya `cols`; setiap nilai dikonversi ke string kanonik:
-   - numerik yang bernilai bulat (dan `|x| < 2**53`) → `str(int(x))` (jadi `7`, `7.0`, `np.int32(7)` → `"7"`);
+   - NaN/None → `"<NA>"`;
+   - `bool` / `np.bool_` (dicek **sebelum** `int` karena `bool` adalah subclass `int` di Python) → `"1"` jika `True`, `"0"` jika `False` (sehingga target biner `True`/`False`, `1`/`0`, dan `1.0`/`0.0` punya bentuk kanonik yang sama);
+   - tipe integer (`int`, `np.integer`, `uint*`) → selalu `str(int(x))` tanpa batas `2**53` (sehingga ID integer 64-bit / 18 digit tidak jatuh ke `.6g` dan tidak pernah bertabrakan);
+   - tipe float (`float`, `np.floating`) yang bernilai bulat (`x.is_integer()`) dan `|x| < 2**53` → `str(int(x))` (jadi `7.0` → `"7"`);
    - float lain → `f"{x:.6g}"` (6 digit signifikan; aman untuk perbedaan float32 vs float64 — pembulatan desimal tetap seperti 10 desimal **tidak** cukup karena `float32(0.1)` = `0.10000000149`);
    - datetime → ISO 8601 (`Timestamp.isoformat()`);
-   - NaN/None → `"<NA>"`; lainnya → `str(x)`.
+   - lainnya → `str(x)`.
 2. Sort berdasarkan kolom id kanonik (string).
 3. `sha256` dari baris-baris yang digabung (`"\x1f"` antar kolom, `"\n"` antar baris).
 
@@ -205,7 +209,7 @@ class Metric:
 
 ### 3.5 `run.py` — `RunManager`
 
-Membuat folder `runs/{YYYYMMDD_HHMM}_{modality}_{run_name}/` (tambah suffix `_2`, `_3` jika bentrok) dan menulis:
+Membuat folder `runs/{YYYYMMDD_HHMM}_{modality}_{run_name}/` (atau `runs/_debug/{YYYYMMDD_HHMM}_{modality}_{run_name}/` jika `cfg.debug=True`; tambah suffix `_2`, `_3` jika bentrok) dan menulis:
 
 | File | Isi | Kapan ditulis |
 |---|---|---|
@@ -227,9 +231,14 @@ Membuat folder `runs/{YYYYMMDD_HHMM}_{modality}_{run_name}/` (tambah suffix `_2`
 - Baris timeseries dengan `fold=-1`: pred = NaN.
 
 **Leaderboard:** setiap run yang selesai menambah satu baris ke `runs/leaderboard.csv`:
-`run_dir, timestamp, modality, run_name, model, metric, cv_raw, cv_postprocessed, cv_honest, n_rows_eval, cv_raw_all, folds_hash, data_hash, seed, fold_seed`.
-Tiga skor `cv_raw`/`cv_postprocessed`/`cv_honest` dihitung pada **subset fold yang sama** (`eval_folds`, lihat §3.6) supaya sebanding; `cv_raw_all` = skor raw di semua fold aktif. **Ranking memakai `cv_honest`.**
-Run yang gagal tidak masuk leaderboard; foldernya diberi file `FAILED` berisi traceback.
+`run_dir, timestamp, modality, run_name, model, metric, cv_raw, cv_postprocessed, cv_honest, n_rows_eval, cv_raw_all, lb_score, folds_hash, data_hash, seed, fold_seed`.
+- Tiga skor `cv_raw`/`cv_postprocessed`/`cv_honest` dihitung pada **subset fold yang sama** (`eval_folds`, lihat §3.6) supaya sebanding; `cv_raw_all` = skor raw di semua fold aktif. **Ranking memakai `cv_honest`.**
+- `lb_score` awalnya `NaN`/kosong saat run selesai, dan diisi setelah submit ke leaderboard lomba via helper `update_lb_score(run_dir_or_name, lb_score, runs_dir="runs")` untuk mengecek korelasi CV vs Public LB.
+- `data_hash` = `data_version["raw_train_hash"]` untuk run model tunggal; untuk run ensemble diisi `folds_hash` jika `raw_train_hash` antar run sumber berbeda, atau `raw_train_hash` yang sama jika semua run sumber berasal dari data mentah yang identik.
+- **Pemetaan tiga skor untuk run ensemble:**
+  - `blend`: `cv_raw` = rata-rata seragam (`mean`) tanpa optimasi bobot dan tanpa `postprocess`; `cv_postprocessed` = skor `in_sample` (bobot + `postprocess` dioptimasi dan dinilai di seluruh `eval_folds`); `cv_honest` = skor `honest` (untuk tiap fold $k \in \text{eval\_folds}$, bobot + `postprocess` dioptimasi di `honest_source(k)` lalu dinilai di fold $k$).
+  - `stack`: karena prediksi OOF level-2 dihasilkan oleh `meta_model` yang dilatih di `honest_source(k)`, prediksi OOF level-2 sudah out-of-fold. Maka `cv_raw` = OOF level-2 tanpa `postprocess`, `cv_postprocessed` = OOF level-2 + `postprocess` in-sample, `cv_honest` = OOF level-2 + `postprocess` honest per fold.
+- Run yang gagal tidak masuk leaderboard; foldernya diberi file `FAILED` berisi traceback. Run dengan `cfg.debug=True` disimpan di `runs/_debug/` dan **tidak** ditambahkan ke `leaderboard.csv`.
 
 ### 3.6 `pipeline.py` — `BasePipeline` (hook)
 
@@ -259,6 +268,7 @@ class BasePipeline:
 
 **Alur `run()`:**
 ```
+self.fold_info = {}; self.classes_ = None # reset state dari run sebelumnya pada instance yang sama
 reasons = cfg.resolve(); cfg.validate()
 seed_everything(cfg.seed)
 rm = RunManager(cfg)                     # config.json (hasil resolve), env.json, notes.md; log reasons
@@ -267,9 +277,11 @@ cek: id unik di train & test, target tidak NaN      → ValueError
 rm.save_data_version(train, test)        # hash SEBELUM feature engineering
 snap = train[[id, target, group_col?, time_col?]]
 folds, meta = get_folds(snap, cfg); rm.save_folds(folds, meta)   # fold dibuat SEBELUM build_features
-ids_tr, ids_te = set id train, set id test
+te_check_cols = [id] + ([time_col] if cv_strategy == "timeseries" else [])
+te_snap_hash = canonical_hash(test, te_check_cols, sort_by=id)
 train, test = build_features(train, test)
-assert set id train == ids_tr dan set id test == ids_te          → ValueError (sebut hook build_features)
+assert compute_ids_target_hash(train, cfg) == meta["ids_target_hash"] \
+   dan canonical_hash(test, te_check_cols, sort_by=id) == te_snap_hash   → ValueError (sebut hook build_features)
 for k in folds aktif:
     tr_idx, va_idx = split_fold(train, folds, k, cfg)            # selaras via id
     tr, va, te = fit_transform_fold(train[tr_idx], train[va_idx], test, k)
@@ -285,7 +297,7 @@ return RunResult(run_dir, oof, test_pred, scores, params)
 
 **Aturan baris & anti-leakage (didokumentasikan di docstring hook):**
 - `build_features` hanya boleh berisi transformasi yang tidak melihat target dan tidak "fit" statistik lintas fold (lag, rolling, date parts, text cleaning, resize).
-- `build_features` **tidak boleh** menambah, menghapus, atau mengubah id di train maupun test. Baris yang tidak punya nilai fitur (mis. lag di awal deret) dibiarkan **NaN**, tidak di-drop. **Urutan** baris boleh berubah (mis. sort per grup × waktu untuk lag), karena semua penyelarasan via id.
+- `build_features` **tidak boleh** menambah, menghapus, atau mengubah `id`, `target`, `group_col` (jika group CV), atau `time_col` (jika timeseries) di train, maupun `id` (dan `time_col` jika timeseries) di test. Dicek dengan membandingkan ulang `compute_ids_target_hash(train, cfg)` terhadap `meta["ids_target_hash"]` dan `canonical_hash(test, [id, time_col?])` sebelum vs sesudah `build_features`. Baris yang tidak punya nilai fitur (mis. lag di awal deret) dibiarkan **NaN**, tidak di-drop. **Urutan** baris boleh berubah (mis. sort per grup × waktu untuk lag), karena semua penyelarasan via id.
 - Semua yang di-*fit* (target encoding, scaler, imputer statistik, feature selection, PCA) **wajib** di `fit_transform_fold`, di-fit hanya pada `tr`.
 - `fit_transform_fold` **boleh** membuang baris dari `tr` (mis. baris warm-up dengan lag NaN), tetapi **tidak boleh** membuang baris dari `va` atau `te` (set id harus tetap; dicek, `ValueError` jika dilanggar).
 
@@ -304,7 +316,7 @@ return RunResult(run_dir, oof, test_pred, scores, params)
 - Skor:
   - `raw` — prediksi mentah, tanpa params (default `apply_params({})`, mis. threshold 0.5).
   - `postprocessed` — params dari `postprocess(oof penuh)`. **Optimistis**: params dioptimasi dan dinilai di OOF yang sama.
-  - `honest` — untuk tiap fold k: `params_k = postprocess(oof[honest_source(k)], None)`, lalu nilai fold k dengan `params_k`.
+  - `honest` — untuk tiap fold k: `params_k = postprocess(oof[honest_source(k)], None)`, lalu nilai fold k dengan `params_k`. *(Catatan: pada non-timeseries, model fold $j \neq k$ dilatih menggunakan baris fold $k$, sehingga OOF fold $j$ sudah melihat fold $k$ secara tidak langsung; efeknya kecil dan standar dalam praktik lomba tanpa biaya nested CV, namun `cv_honest` tidak sepenuhnya bebas bias seperti data test baru).*
   - Jika `postprocess` mengembalikan `{}`, `postprocessed = honest = raw` (pass honest dilewati).
 - `scores.json`:
 ```json
@@ -321,9 +333,13 @@ return RunResult(run_dir, oof, test_pred, scores, params)
 ```
   `overall` = metric atas gabungan OOF fold terkait (untuk honest, tiap fold memakai `params_k`-nya). Leaderboard memakai `eval.*.overall` dan `all_folds.raw.overall`.
 
-**`refit_full` (aturan jumlah iterasi, tertulis di docstring `fit_full_predict`):**
-- Default: `tr, _, te = fit_transform_fold(train, train.iloc[:0], test, fold=-1)`, `model = build_model(-1)`, lalu `fit_predict_fold(model, tr, <va kosong>, te, -1)`. `fold=-1` menandakan refit; tidak ada early stopping.
-- **GBDT:** `fit_predict_fold` mencatat `self.fold_info[k]["best_iteration"]` saat CV; saat `fold == -1`, jumlah iterasi = `refit_iterations()` = `round(mean(best_iteration antar fold) × cfg.refit_iter_mult)` (default `1.1`).
+**`refit_full` (aturan hook & jumlah iterasi, tertulis di docstring `fit_transform_fold`, `fit_predict_fold`, dan `fit_full_predict`):**
+- Default: `tr, va_empty, te = fit_transform_fold(train, train.iloc[:0], test, fold=-1)`, `model = build_model(-1)`, lalu `fit_predict_fold(model, tr, va_empty, te, -1)`. `fold=-1` dan `len(va) == 0` menandakan refit; tidak ada early stopping.
+- **Kontrak wajib hook saat `fold == -1` / `len(va) == 0`:**
+  - `fit_transform_fold(tr, va, te, fold)` wajib menangani `len(va) == 0` tanpa memanggil `.transform(va)` pada transformer sklearn/encoder yang menolak 0 baris (kembalikan `tr.iloc[:0].copy()` supaya skema kolom `va` tetap identik dengan `tr`).
+  - `fit_predict_fold(model, tr, va, te, fold)` wajib menangani `fold == -1` / `len(va) == 0` dengan melewati `eval_set`/early stopping dan mengembalikan `va_pred` kosong (`np.empty(0)` atau `np.empty((0, K))` untuk multiclass).
+- **Reset `fold_info`:** `self.fold_info` selalu di-reset ke `{}` di awal `run()` supaya `refit_iterations()` tidak memakai sisa `best_iteration` dari run sebelumnya pada instance pipeline yang sama.
+- **GBDT:** `fit_predict_fold` mencatat `self.fold_info[k]["best_iteration"]` saat CV (`fold >= 0`); saat `fold == -1`, jumlah iterasi = `refit_iterations()` = `round(mean(best_iteration antar fold) × cfg.refit_iter_mult)` (default `1.1`).
 - **Deep learning:** jumlah epoch tetap dari config modalitas (mis. `cfg.epochs`), bukan early stopping.
 - Jika tidak ada `best_iteration` yang tercatat, `refit_iterations()` mengembalikan `None` dan model dilatih dengan setting di config apa adanya.
 
@@ -341,8 +357,11 @@ return RunResult(run_dir, oof, test_pred, scores, params)
   - `weights` — optimasi bobot non-negatif, jumlah 1, memaksimalkan/meminimalkan metric di OOF (`scipy.optimize.minimize`).
   - `hill_climb` — greedy forward selection dengan replacement.
   - `postprocess` opsional (fungsi pure `oof_df -> params`, mis. threshold untuk blend binary F1).
-  - Skor memakai **skema yang sama dengan §3.6**: `in_sample` (bobot + params dioptimasi dan dinilai di OOF yang sama, optimistis) dan `honest` (untuk tiap `k ∈ eval_folds`, bobot + params dioptimasi di `honest_source(k)`, dinilai di fold k). `eval_folds` / `honest_source` mengikuti `cv_strategy` run sumber (timeseries → hanya fold < k, fold ≥ 1). Untuk metode tanpa optimasi dan tanpa `postprocess`, `honest = in_sample`. Bobot final (untuk test) dioptimasi di seluruh OOF.
-- `stack(data, meta_model, cfg)` — meta-model dilatih dengan **`folds.csv` yang sama**, input = OOF level-1; menghasilkan OOF level-2 yang valid.
+  - Skor memakai **skema yang sama dengan §3.6** sehingga terpetakan langsung ke kolom leaderboard (`eval.raw`, `eval.postprocessed`, `eval.honest`):
+    - `raw` = rata-rata seragam (`mean`) tanpa optimasi bobot dan tanpa `postprocess`.
+    - `postprocessed` (`in_sample`) = bobot + `postprocess` dioptimasi dan dinilai di `eval_folds` yang sama (optimistis).
+    - `honest` = untuk tiap `k ∈ eval_folds`, bobot + `postprocess` dioptimasi di `honest_source(k)`, dinilai di fold k. `eval_folds` / `honest_source` mengikuti `cv_strategy` run sumber (timeseries → hanya fold < k, fold ≥ 1). Untuk metode tanpa optimasi (`mean`, `rank_mean`, `geo_mean`) dan tanpa `postprocess`, `honest = postprocessed`. Bobot final (untuk test) dioptimasi di seluruh OOF.
+- `stack(data, meta_model, cfg, postprocess=None)` — meta-model dilatih dengan **`folds.csv` yang sama** di `honest_source(k)`, input = OOF level-1; menghasilkan OOF level-2 yang valid (`eval.raw` = OOF level-2 mentah, `eval.postprocessed` = OOF level-2 + `postprocess` in-sample, `eval.honest` = OOF level-2 + `postprocess` honest per fold).
 - Hasil blend/stack disimpan sebagai run baru (`modality="ensemble"`) lewat `RunManager`, termasuk daftar run sumber + bobot di `config.json`.
 
 ### 3.8 `io.py`
@@ -386,7 +405,7 @@ res.make_submission(sample_sub, "submission.csv")
 | `folds_path` tidak cocok (id / n_folds / cv_strategy / group_col / time_col / `ids_target_hash`) | `FoldMismatchError` — **stop**, bukan warning |
 | `folds_path` cocok, tapi hash data mentah berbeda dari run asal | `FoldDataChangedWarning` yang menyebut `source_run`; run lanjut |
 | ID duplikat di train/test, atau target NaN | `ValueError` |
-| `build_features` menambah/menghapus/mengubah id di train/test | `ValueError` yang menyebut hook `build_features` |
+| `build_features` mengubah `id`, `target`, `group_col`, atau `time_col` di train/test | `ValueError` yang menyebut hook `build_features` |
 | `fit_transform_fold` mengubah set id di `va` atau `te` | `ValueError` yang menyebut hook `fit_transform_fold` |
 | Metric tidak dikenal | `KeyError` dengan daftar metric yang tersedia |
 | Exception di tengah fold | Traceback ditulis ke `FAILED` di folder run, tidak masuk leaderboard, exception dilempar ulang |
@@ -400,12 +419,12 @@ res.make_submission(sample_sub, "submission.csv")
 `pytest` di `tests/core/` dengan data sintetis kecil (tanpa GPU, tanpa download):
 
 - `test_config.py` — `resolve()` otomatis memilih `stratified` / `kfold` / `stratified_group` / `group` dan `test_mode` (`refit_full` untuk timeseries, `fold_avg` untuk lainnya); warning saat `time_col` diisi tapi `cv_strategy` bukan `timeseries`; `validate()` menolak kombinasi invalid.
-- `test_io.py` — `canonical_hash` sama untuk: urutan baris diacak, id `int` vs `str` vs `float` bulat (`7`/`"7"`/`7.0`), target `float32` vs `float64`, datetime vs ISO string yang sama; berbeda jika satu label berubah atau satu id hilang.
+- `test_io.py` — `canonical_hash` sama untuk: urutan baris diacak, id `int` vs `str` vs `float` bulat (`7`/`"7"`/`7.0`), target biner `bool` (`True`/`False`) vs `int` (`1`/`0`) vs `float` (`1.0`/`0.0`), target `float32` vs `float64`, datetime vs ISO string yang sama; ID integer 64-bit ≥ `2**53` (18 digit) yang berbeda 1 tetap menghasilkan string/hash berbeda; berbeda jika satu label berubah atau satu id hilang.
 - `test_cv.py` — setiap strategi menghasilkan fold yang benar; stratified menjaga proporsi; group tidak bocor antar fold; timeseries: bagi per waktu unik (data panel tidak terbelah antar blok), train selalu lebih awal dari valid, `ts_gap` dan `ts_max_train_size` dalam rank periode unik dihormati, `fold=-1` untuk blok awal; reuse `folds_path` menghasilkan fold identik; `fold_seed` terpisah dari `seed`; mismatch id / n_folds / cv_strategy / hash → `FoldMismatchError`; isi `group_col` (group CV) atau `time_col` (timeseries) diubah → `FoldMismatchError`; hanya kolom fitur berubah → fold lolos + `FoldDataChangedWarning`; data dengan urutan baris diacak tetap mendapat fold yang sama (join via id).
 - `test_metrics.py` — nilai built-in cocok dengan sklearn; konversi proba→label (threshold & argmax); `register_metric` custom.
-- `test_run.py` — semua file artefak terbentuk dengan skema benar (`config.json` menyimpan nilai hasil resolve); leaderboard bertambah satu baris dengan kolom `cv_raw`, `cv_postprocessed`, `cv_honest`, `n_rows_eval`, `cv_raw_all`, `seed`, `fold_seed`; run gagal menulis `FAILED` dan tidak masuk leaderboard.
-- `test_pipeline.py` — smoke test end-to-end dengan pipeline dummy (sklearn `LogisticRegression`/`Ridge`) untuk binary, multiclass, regression, timeseries; `test_mode` fold_avg vs refit_full (`refit_iterations`); `build_features` mengubah id → `ValueError`; `build_features` mengacak urutan baris → tetap selaras via id; `fit_transform_fold` boleh buang baris `tr` tapi tidak `va`/`te`; skema skor raw vs postprocessed vs honest (fold ≠ k untuk non-TS, fold < k untuk TS, `test_df=None` pada pass honest).
-- `test_ensemble.py` — blend mean/rank_mean/geo_mean/weights/hill_climb + skor `in_sample` vs `honest`; stacking memakai fold yang sama; `folds_hash` berbeda → error; set id test berbeda → error; NaN timeseries ditangani.
+- `test_run.py` — semua file artefak terbentuk dengan skema benar (`config.json` menyimpan nilai hasil resolve); leaderboard bertambah satu baris dengan kolom `cv_raw`, `cv_postprocessed`, `cv_honest`, `n_rows_eval`, `cv_raw_all`, `lb_score`, `data_hash` (= `raw_train_hash`), `seed`, `fold_seed`; `update_lb_score` memperbarui `lb_score` untuk run terkait; run gagal menulis `FAILED` dan tidak masuk leaderboard; `debug=True` menulis ke `runs/_debug/` dan tidak menambah leaderboard.
+- `test_pipeline.py` — smoke test end-to-end dengan pipeline dummy (sklearn `LogisticRegression`/`Ridge`) untuk binary, multiclass, regression, timeseries; `test_mode` fold_avg vs refit_full (`refit_iterations`, reset `fold_info` saat instance dipanggil ulang, dan `fit_transform_fold` dengan `StandardScaler`/target encoding saat `va` kosong & `fold=-1`); `build_features` mengubah `id`, `target`, atau `time_col` → `ValueError`; `build_features` mengacak urutan baris → tetap selaras via id; `fit_transform_fold` boleh buang baris `tr` tapi tidak `va`/`te`; `debug=True` mengabaikan `folds_path`, memakai 2 fold di `runs/_debug/`, dan tidak menambah leaderboard; skema skor raw vs postprocessed vs honest (fold ≠ k untuk non-TS, fold < k untuk TS, `test_df=None` pada pass honest).
+- `test_ensemble.py` — blend mean/rank_mean/geo_mean/weights/hill_climb + pemetaan `eval.raw` (mean tanpa optimasi), `eval.postprocessed` (`in_sample`), dan `eval.honest` (`honest`) di `scores.json` & `leaderboard.csv`; stacking memakai fold yang sama; `folds_hash` berbeda → error; set id test berbeda → error; NaN timeseries ditangani.
 - `test_seed.py` — dua run dengan `seed` sama → OOF identik; dua run dengan `seed` berbeda tapi `fold_seed` sama → `folds_hash` identik dan bisa di-blend.
 
 ---
