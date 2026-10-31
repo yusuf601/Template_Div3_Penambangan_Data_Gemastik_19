@@ -1,5 +1,6 @@
 """Core utilities for Gemastik template."""
 
+from utils.core.config import BaseConfig
 from utils.core.errors import (
     ConfigError,
     DataError,
@@ -16,6 +17,14 @@ from utils.core.io import (
     load_parquet,
     save_json,
     save_parquet,
+)
+from utils.core.metrics import (
+    Metric,
+    get_metric,
+    is_better,
+    list_metrics,
+    register_metric,
+    score,
 )
 from utils.core.seed import seed_everything
 
@@ -34,4 +43,11 @@ __all__ = [
     "save_parquet",
     "load_parquet",
     "seed_everything",
+    "Metric",
+    "register_metric",
+    "get_metric",
+    "list_metrics",
+    "is_better",
+    "score",
+    "BaseConfig",
 ]

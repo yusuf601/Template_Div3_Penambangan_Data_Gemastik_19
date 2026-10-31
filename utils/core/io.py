@@ -73,16 +73,16 @@ def canon_id(series: pd.Series) -> pd.Series:
         not_na = s.notna()
         if not not_na.any():
             return res
-        s_valid = s[not_na]
-        finite = np.isfinite(s_valid)
-        int_mask = finite & (s_valid == np.floor(s_valid)) & (s_valid.abs() < 9007199254740992)
+        valid_vals = s.to_numpy()[not_na.to_numpy()]
+        finite = np.isfinite(valid_vals)
+        int_mask = finite & (valid_vals == np.floor(valid_vals)) & (np.abs(valid_vals) < 9007199254740992)
+        formatted = np.empty(len(valid_vals), dtype=object)
         if int_mask.any():
-            int_idx = s_valid[int_mask].index
-            res.loc[int_idx] = s_valid[int_mask].astype(np.int64).astype(str)
+            formatted[int_mask] = valid_vals[int_mask].astype(np.int64).astype(str)
         other_mask = ~int_mask
         if other_mask.any():
-            other_idx = s_valid[other_mask].index
-            res.loc[other_idx] = [f"{float(x):.6g}" for x in s_valid[other_mask]]
+            formatted[other_mask] = [f"{float(x):.6g}" for x in valid_vals[other_mask]]
+        res.loc[not_na] = formatted
         return res
 
     if pd.api.types.is_datetime64_any_dtype(s.dtype):

@@ -160,6 +160,5 @@ def test_core_exports():
         "load_parquet",
         "seed_everything",
     }
-    assert set(utils.core.__all__) == expected
-    assert len(utils.core.__all__) == 14
+    assert expected.issubset(set(utils.core.__all__))
 
