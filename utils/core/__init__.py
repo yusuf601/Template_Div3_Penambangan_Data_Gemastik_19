@@ -1,6 +1,17 @@
 """Core utilities for Gemastik template."""
 
 from utils.core.config import BaseConfig
+from utils.core.cv import (
+    compute_folds_hash,
+    compute_ids_target_hash,
+    debug_subsample,
+    get_folds,
+    load_folds,
+    make_folds,
+    make_folds_file,
+    save_folds,
+    split_fold,
+)
 from utils.core.errors import (
     ConfigError,
     DataError,
@@ -50,4 +61,13 @@ __all__ = [
     "is_better",
     "score",
     "BaseConfig",
+    "compute_ids_target_hash",
+    "compute_folds_hash",
+    "make_folds",
+    "save_folds",
+    "load_folds",
+    "get_folds",
+    "make_folds_file",
+    "split_fold",
+    "debug_subsample",
 ]
