@@ -98,6 +98,9 @@ def compute_ids_target_hash(snap: pd.DataFrame, cfg: BaseConfig) -> str:
 
 def compute_folds_hash(folds_df: pd.DataFrame, cfg: BaseConfig) -> str:
     """Compute deterministic hash over id->fold mapping plus n_folds and cv_strategy."""
+    if cfg.cv_strategy is None:
+        cfg = copy.deepcopy(cfg)
+        cfg.resolve()
     mapping_hash = canon_hash(folds_df, [cfg.id_col, "fold"], sort_by=cfg.id_col)
     payload = f"{cfg.n_folds}\x1f{cfg.cv_strategy}\n{mapping_hash}"
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
@@ -341,6 +344,11 @@ def split_fold(
 
     folds_cid = canon_id(folds_df[cfg.id_col])
     fold_map = pd.Series(folds_df["fold"].to_numpy(dtype=int), index=folds_cid.to_numpy())
+    if not set(snap_cid.to_numpy()).issubset(set(fold_map.index)):
+        raise FoldMismatchError(
+            "Terdapat ID pada data yang tidak ditemukan di folds_df.",
+            "Pastikan folds_df mencakup seluruh ID pada data atau buat ulang fold.",
+        )
     folds_arr = fold_map.loc[snap_cid.to_numpy()].to_numpy(dtype=int)
 
     cid_arr = snap_cid.to_numpy()

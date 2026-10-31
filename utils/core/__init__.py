@@ -86,7 +86,6 @@ __all__ = [
     "split_fold",
     "debug_subsample",
     "LEADERBOARD_COLS",
-    "safe_name",
     "RunManager",
     "update_lb_score",
     "sync_leaderboard",

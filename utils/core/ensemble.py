@@ -39,9 +39,9 @@ def load_runs(
     allow_partial: bool = False,
 ) -> EnsembleData:
     """Load and validate multiple run directories for OOF blending, aligning rows via canon_id."""
-    if not run_dirs or len(run_dirs) < 1:
+    if not run_dirs or len(run_dirs) < 2:
         raise ConfigError(
-            "Daftar run_dirs untuk load_runs kosong (lihat [Perbaikan]).",
+            "Daftar run_dirs untuk load_runs membutuhkan minimal 2 run (lihat [Perbaikan]).",
             "Berikan minimal 2 folder run yang valid ke load_runs(run_dirs).",
         )
 

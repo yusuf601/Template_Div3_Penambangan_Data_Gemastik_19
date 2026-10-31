@@ -846,6 +846,11 @@ class BasePipeline:
                 test_fold_preds[k] = test_k_df
                 completed_folds.append(k)
 
+                clip_range = None
+                if self.cfg.metric == "qwk" and self.cfg.task == "regression":
+                    valid_t = oof_df[target_col].dropna()
+                    if len(valid_t) > 0:
+                        clip_range = (int(np.min(valid_t)), int(np.max(valid_t)))
                 fold_score = score(
                     oof_df.loc[pos, target_col].to_numpy(),
                     _extract_raw_preds(oof_df.loc[pos], pred_cols),
@@ -853,6 +858,7 @@ class BasePipeline:
                     self.cfg.task,
                     threshold=0.5,
                     classes=self.classes_,
+                    clip_range=clip_range,
                 )
                 rm.log(
                     f"Fold {k} done in {duration_sec:.2f}s | {self.cfg.metric}={fold_score:.6f}"
