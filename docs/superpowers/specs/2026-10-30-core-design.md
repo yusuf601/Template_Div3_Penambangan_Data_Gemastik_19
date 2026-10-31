@@ -1,5 +1,8 @@
 # Template Final Gemastik Data — Spec #1: Core
 
+> [!WARNING]
+> **SUPERSEDED** oleh `2026-10-31-core-lite-design.md` (2026-10-31). Spec ini terlalu rumit untuk lomba 5 jam dan hanya disimpan sebagai arsip keputusan. Plan `2026-10-30-core.md` juga tidak berlaku.
+
 - **Tanggal:** 2026-10-30
 - **Status:** Draft — menunggu review user
 - **Scope spec ini:** `utils/core/` (fondasi bersama). Modul tabular, image, text punya spec terpisah (lihat Roadmap).
