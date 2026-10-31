@@ -37,6 +37,12 @@ from utils.core.metrics import (
     register_metric,
     score,
 )
+from utils.core.pipeline import (
+    REFIT_TIME_MARGIN,
+    BasePipeline,
+    RunResult,
+    compute_scores,
+)
 from utils.core.report import compare_runs, generate_report
 from utils.core.run import (
     LEADERBOARD_COLS,
@@ -85,4 +91,8 @@ __all__ = [
     "sync_leaderboard",
     "generate_report",
     "compare_runs",
+    "REFIT_TIME_MARGIN",
+    "compute_scores",
+    "RunResult",
+    "BasePipeline",
 ]
