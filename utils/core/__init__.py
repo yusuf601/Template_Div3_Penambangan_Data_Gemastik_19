@@ -12,6 +12,7 @@ from utils.core.cv import (
     save_folds,
     split_fold,
 )
+from utils.core.ensemble import EnsembleData, blend, load_runs
 from utils.core.errors import (
     ConfigError,
     DataError,
@@ -95,4 +96,7 @@ __all__ = [
     "compute_scores",
     "RunResult",
     "BasePipeline",
+    "EnsembleData",
+    "load_runs",
+    "blend",
 ]
