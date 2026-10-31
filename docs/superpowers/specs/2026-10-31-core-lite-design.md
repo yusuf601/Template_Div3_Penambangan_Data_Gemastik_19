@@ -1,7 +1,7 @@
 # Template Final Gemastik Data — Spec #1 (revisi): Core-lite
 
 - **Tanggal:** 2026-10-31
-- **Status:** Draft — menunggu review user
+- **Status:** Approved (2026-10-31) — plan: `docs/superpowers/plans/2026-10-31-core-lite.md`
 - **Menggantikan:** `2026-10-30-core-design.md` (terlalu rumit untuk lomba 5 jam; disimpan sebagai arsip keputusan)
 - **Scope:** `utils/core/`. Modul tabular, image, text, dan kit offline punya spec terpisah (§9).
 
@@ -13,7 +13,7 @@
 |---|---|
 | Durasi **5 jam** | Prioritas: baseline valid dalam menit, sedikit konsep, error yang langsung memberi solusi |
 | Data **baru dibuka saat lomba**, modalitas belum diketahui | Core generik; tiga modalitas harus siap; gladi resik dengan dataset tiruan |
-| GPU **minimal RTX 3050** (asumsi VRAM 4 GB) | `max_minutes` per run + resume per fold ada di Core |
+| GPU **hanya 1 di 1 PC** (minimal RTX 3050, VRAM 4 GB); **laptop lain CPU-only (support)** | `max_minutes` + resume per fold di PC GPU; laptop support menjalankan EDA, pembuatan `folds.csv`, tabular GBDT CPU, TF-IDF baseline, blending, dan pembuatan slide; folder run harus **portabel lintas mesin** (path relatif + `sync_leaderboard`) |
 | **Tanpa internet** (local LLM boleh) | Core tidak pernah mengakses jaringan; dependensi hanya numpy, pandas, scikit-learn, scipy, pyarrow, matplotlib |
 | **Ada presentasi** | Tiap run otomatis menulis `summary.md` + plot dasar |
 
@@ -67,12 +67,14 @@ template_gemastik/
 
 ### 4.1 `io.py` — id dan hash kanonik
 
-- `canon_id(series) -> pd.Series[str]` — dipakai untuk **semua** join:
-  - `bool` → `"1"` / `"0"` (dicek sebelum integer)
-  - tipe integer (`int*`, `uint*`) → `str(int(x))`, tanpa batas `2**53`
-  - float bernilai bulat dengan `|x| < 2**53` → `str(int(x))`; float lain → `f"{x:.6g}"`
-  - datetime → `Timestamp.isoformat()`; NaN → `"<NA>"`; lainnya → `str(x)`
-- `canon_hash(df, cols, sort_by) -> str` — terapkan aturan `canon_id` ke tiap kolom, sort berdasarkan `sort_by`, `sha256` atas baris yang digabung (`"\x1f"` antar kolom, `"\n"` antar baris).
+- `canon_id(series) -> pd.Series[str]` — dipakai untuk **semua** join; **divektorisasi per dtype** agar cepat pada jutaan baris:
+  - dtype `bool` → vektorisasi map `{True: "1", False: "0"}` (dicek sebelum integer)
+  - dtype integer (`int*`, `uint*`) → `series.astype(str)`, tanpa batas `2**53`
+  - dtype float (`float*`) → vektorisasi: mask nilai bulat dengan `|x| < 2**53` dikonversi ke `int64` lalu `astype(str)`, float lain diformat `f"{x:.6g}"`, NaN → `"<NA>"`
+  - dtype `datetime64*` → ISO 8601 (`Timestamp.isoformat()`); NaN/NaT → `"<NA>"`
+  - hanya kolom `object` / bertipe campuran yang memakai konversi per elemen.
+- `canon_hash(df, cols, sort_by) -> str` — terapkan `canon_id` hanya pada `cols`, sort berdasarkan `sort_by`, `sha256` atas baris yang digabung (`"\x1f"` antar kolom, `"\n"` antar baris). Dipakai **hanya untuk kolom sedikit** (`ids_target_hash`, `folds_hash`, `test_ids_hash`).
+- `fast_df_hash(df) -> str` — `sha256` atas `pd.util.hash_pandas_object(df, index=False).values.tobytes()`. Sangat cepat untuk tabel lebar (mis. 1 juta baris × 50 kolom); dipakai untuk `raw_train_hash` yang sifatnya informatif.
 - `save_json`, `load_json` (mendukung tipe numpy), `save_parquet`, `load_parquet`.
 
 ### 4.2 `config.py` — `BaseConfig`
@@ -86,6 +88,7 @@ Dataclass `kw_only=True`. Modalitas men-subclass.
 | `metric` | wajib | Nama di registry |
 | `id_col` | `"id"` | |
 | `run_name` | `"baseline"` | |
+| `owner` | `""` | Nama anggota/mesin; jika kosong otomatis diisi dari `socket.gethostname()` saat `resolve()` agar nama folder unik antar-laptop tanpa perlu diingat |
 | `modality` | `"generic"` | |
 | `seed` | `42` | Seed model |
 | `fold_seed` | `42` | Seed `make_folds` |
@@ -105,6 +108,7 @@ Dataclass `kw_only=True`. Modalitas men-subclass.
 | `extra` | `{}` | Bebas |
 
 **Auto-resolve** (di awal `run()`; hasil ditulis ke `config.json` dan dicatat di log):
+- `owner==""`: diisi otomatis dari `socket.gethostname()` (dibersihkan ke alfanumerik lowercase).
 - `cv_strategy=None`: `group_col` diisi → `stratified_group` (klasifikasi) / `group` (regresi); selain itu → `stratified` / `kfold`. `timeseries` tidak pernah dipilih otomatis; jika `time_col` diisi tanpa `timeseries` → warning.
 - `test_mode=None`: `refit_full` untuk `timeseries`, selain itu `fold_avg`.
 
@@ -128,41 +132,47 @@ Dataclass `kw_only=True`. Modalitas men-subclass.
 - `meta` (`folds_meta.json`): `source_run`, `n_folds`, `cv_strategy`, `fold_seed`, `group_col`, `time_col`, `ids_target_hash` (`canon_hash` atas id, target, + group/time bila dipakai split), `folds_hash` (`canon_hash` atas id→fold + `n_folds` + `cv_strategy`).
 - `load_folds(path, snap, cfg)` → `FoldMismatchError` (dengan perbaikan "set `folds_path=None`") jika set id, `n_folds`, `cv_strategy`, atau `ids_target_hash` berbeda.
 - `get_folds(snap, cfg)` — load jika `folds_path` diisi, selain itu make.
+- `make_folds_file(train_df, cfg, out_dir="folds") -> Path` — API mandiri untuk membuat `folds/folds.csv` + `folds/folds_meta.json` (`source_run="standalone"`) di awal lomba sebelum menjalankan pipeline apa pun. Seluruh mesin kemudian cukup mengarahkan `cfg.folds_path = "folds/folds.csv"` (path relatif terhadap root project).
 - `split_fold(snap, folds_df, k, cfg) -> (train_ids, valid_ids)` — mengembalikan **set id kanonik**, dihitung dari **snapshot** sebelum `build_features` (sehingga `time_col` yang diubah hook tidak memengaruhi split).
   - non-timeseries: train = fold ≠ k (dan ≠ -1), valid = fold == k.
   - timeseries: `t_rank` = dense rank waktu; `r0` = rank minimum valid; train = `t_rank < r0 - ts_gap`. Train kosong → `ValueError` dengan perbaikan "kurangi `ts_gap` atau `n_folds`".
 
 ### 4.5 `run.py` — `RunManager`
 
-Folder: `runs/{YYYYMMDD_HHMM}_{modality}_{run_name}/` (suffix `_2`, `_3` jika bentrok; `runs/_debug/...` jika debug; folder yang sama jika `resume_from`).
+Folder: `runs/{YYYYMMDD_HHMM}_{owner_}{modality}_{run_name}/` (`{owner_}` = `f"{cfg.owner}_"` jika `cfg.owner` diisi, kosong jika tidak; timestamp selalu menggunakan `zoneinfo.ZoneInfo("Asia/Jakarta")` agar urutan waktu konsisten lintas mesin; suffix `_2`, `_3` jika bentrok; `runs/_debug/...` jika debug; folder yang sama jika `resume_from`).
 
 | File | Isi |
 |---|---|
 | `config.json` | Config hasil resolve |
 | `folds.csv`, `folds_meta.json` | Fold yang dipakai |
-| `data_version.json` | `raw_train_hash` (`canon_hash` semua kolom train, sebelum `build_features`), `test_ids_hash`, shape, kolom |
-| `fold_preds/fold{k}_oof.parquet`, `fold{k}_test.parquet` | Ditulis **segera setelah fold k selesai** (dasar resume) |
+| `data_version.json` | `raw_train_hash` (`fast_df_hash` semua kolom train, sebelum `build_features`), `test_ids_hash` (`canon_hash` kolom id test), shape, kolom |
+| `fold_preds/fold{k}_oof.parquet`, `fold{k}_test.parquet`, `fold{k}_info.json` | Ditulis **segera setelah fold k selesai** (dasar resume). `fold{k}_info.json` menyimpan `best_iteration`, `duration_sec`, dan `importances` (`dict[str, float]`) fold k |
 | `oof.parquet` | `id`, `fold`, target, `pred` / `pred_0..pred_{K-1}` |
 | `test_pred.parquet` | `id`, kolom pred |
-| `scores.json` | §5.3 |
+| `scores.json` | §5.3 (mencakup seluruh metadata yang dibutuhkan baris leaderboard: `model`, `timestamp`, `owner`, `minutes`, `data_hash`, `status`, `test_pred_source`, sehingga `sync_leaderboard` dapat membangun ulang baris leaderboard secara utuh dan identik) |
 | `postprocess.json` | Params dari `postprocess` (mis. threshold) |
+| `lb.json` | Opsional; ditulis oleh `update_lb_score` (`{"lb_score": float, "note": str, "updated_at": str}`) agar skor LB ikut terbawa saat folder run disalin antar-laptop |
 | `summary.md`, `plots/` | §4.6 |
 | `log.txt` | Log run |
-| `FAILED` / `PARTIAL` | Penanda status |
+| `FAILED` / `PARTIAL` | Penanda status (`PARTIAL` **hanya** ditulis jika ada fold yang belum selesai; dihapus otomatis jika `resume_from` menyelesaikan seluruh fold) |
 
 **Leaderboard** `runs/leaderboard.csv` — satu baris per run selesai (termasuk `PARTIAL`, tidak termasuk debug/gagal):
-`run_dir, timestamp, modality, run_name, model, metric, cv, cv_raw, cv_post, cv_honest, cv_std, n_folds_done, status, lb_score, minutes, folds_hash, data_hash, seed, fold_seed`
-- `cv` = kolom ranking = `cv_honest` jika ada, selain itu `cv_raw`.
+`run_dir, timestamp, owner, modality, run_name, model, metric, cv, cv_raw, cv_post, cv_honest, cv_std, n_folds_done, n_rows_eval, status, test_pred_source, lb_score, minutes, folds_hash, data_hash, seed, fold_seed`
+- `run_dir` disimpan sebagai **nama folder relatif** (mis. `20261031_1300_yusuf_tabular_lgbm`), **bukan** absolute path, supaya folder run dari laptop support yang di-copy via flashdisk/LAN ke PC utama tetap langsung terbaca.
+- `append_leaderboard` melakukan **upsert berdasarkan `run_dir`**: jika `run_dir` sudah ada di `leaderboard.csv` (mis. sebelumnya `partial` lalu dilanjutkan via `resume_from`), baris lama diperbarui di tempat (tidak menambah baris ganda) dan `lb_score` yang sudah ada dipertahankan.
+- `cv` = kolom ranking = selalu sama dengan `cv_honest` pada `eval_folds` (jika `postprocess` tidak di-override, `cv_post = cv_honest = cv_raw` pada `eval_folds`, sehingga semua run dinilai pada populasi baris `eval_folds` yang persis sama; lihat §5.3).
 - `data_hash` = `raw_train_hash`.
-- `lb_score` kosong; diisi via `update_lb_score(run, score, runs_dir="runs")`.
-- `status ∈ {ok, partial}`.
+- `lb_score` kosong di awal; diisi via `update_lb_score(run, score, note="", runs_dir="runs")` yang menulis `lb.json` di dalam folder run **dan** meng-update `runs/leaderboard.csv`.
+- `status ∈ {ok, partial}` (murni menunjukkan apakah semua fold aktif selesai: `n_folds_done == n_active_folds`).
+- `test_pred_source ∈ {fold_avg, refit, fold_avg_fallback}` (terpisah dari `status`; lihat §5.4).
+- `sync_leaderboard(runs_dir="runs") -> pd.DataFrame`: memindai semua `runs/*/scores.json` + `config.json` + `lb.json` (mengabaikan `_debug` dan folder berisi `FAILED`), dan menulis ulang `runs/leaderboard.csv` yang **100% identik** kolom dan nilainya dengan yang ditulis `append_leaderboard`. Dipakai saat menggabungkan folder run dari laptop support dan PC GPU.
 
 ### 4.6 `report.py` — bahan presentasi
 
 Ditulis di akhir setiap run (gagal render → warning, run tetap sukses):
-- `summary.md`: run_name, model, notes, config inti (task, metric, cv_strategy, n_folds, seed), tabel skor per fold + cv, status, durasi, top-20 feature importance (jika pipeline mengisi `self.importances` sebagai `pd.Series`).
+- `summary.md`: run_name, model, notes, config inti (task, metric, cv_strategy, n_folds, seed), tabel skor per fold + cv (`eval_folds`), status, durasi, top-20 feature importance (rata-rata lintas fold selesai dari `fold{k}_info.json`).
 - `plots/`: `fold_scores.png`; klasifikasi → `confusion_matrix.png` (dari OOF dengan threshold/argmax); regresi → `residuals.png`; `importance.png` jika ada.
-- `compare_runs(runs_dir="runs", top=10) -> pd.DataFrame` — tabel leaderboard terurut `cv` untuk slide.
+- `compare_runs(runs_dir="runs", top=10, include_partial=False) -> pd.DataFrame` — tabel leaderboard terurut `cv` untuk slide; secara default **hanya menampilkan `status == "ok"`** supaya run `partial` yang baru menyelesaikan sebagian fold tidak merusak perbandingan.
 
 ### 4.7 `ensemble.py`
 
@@ -181,7 +191,7 @@ reset state (fold_info, importances, classes_)
 resolve + validate config; seed_everything(cfg.seed); mulai timer
 rm = RunManager(cfg)            # atau buka folder resume_from
 cek id unik train/test, target tidak NaN                        → raise
-debug: subsample train (≤ 2000 baris, fold_seed)
+debug: subsample train sesuai cv_strategy (§5.5, ≤ 2000 baris, fold_seed)
 rm.save_data_version(train, test)
 snap = train[[id, target, group?, time?]]
 folds, meta = get_folds(snap, cfg); rm.save_folds(...)
@@ -190,15 +200,31 @@ set id train/test berubah                                       → raise
 id/target/group/time berubah (canon_hash vs meta)               → warning keras
 multiclass: classes_ = sorted(unique target)
 for k in fold aktif:
-    jika fold k sudah ada di fold_preds (resume) → load, lanjut
+    jika fold k sudah ada di fold_preds (resume) → load oof, test, & fold{k}_info.json (fold_info[k] + importances), lanjut
     jika max_minutes terlampaui → hentikan, status = partial
+    t0 = time.monotonic()
     tr, va, te = fit_transform_fold(train[train_ids], train[valid_ids], test, k)
     set id va/te berubah                                        → raise
     model = build_model(k)
     model, va_pred, te_pred = fit_predict_fold(model, tr, va, te, k)
-    tulis fold_preds/fold{k}_*.parquet; log skor fold
-test_pred = rata-rata fold selesai, atau fit_full_predict(train, test) jika refit_full
-            (refit dilewati dengan warning jika status partial)
+    fold_info[k]["duration_sec"] = time.monotonic() - t0
+    tulis fold_preds/fold{k}_{oof,test}.parquet + fold{k}_info.json; log skor fold
+aggregasi self.importances = rata-rata importances lintas fold selesai (jika ada)
+status = "ok" jika semua fold aktif selesai (hapus file PARTIAL jika ada dari sebelum resume), selain itu "partial" (tulis file PARTIAL)
+jika test_mode == "refit_full":
+    jika status == "partial" ATAU (max_minutes diisi dan sisa_waktu < max(duration_sec) * 1.25):
+        warning keras ("refit_full dilewati, test_pred memakai rata-rata fold selesai")
+        test_pred = rata-rata te_pred dari fold yang selesai
+        test_pred_source = "fold_avg_fallback"
+    selain itu:
+        t_refit = time.monotonic()
+        test_pred = fit_full_predict(train, test)
+        refit_duration_sec = time.monotonic() - t_refit
+        test_pred_source = "refit"
+selain itu:
+    test_pred = rata-rata te_pred dari fold yang selesai
+    test_pred_source = "fold_avg"
+minutes = (sum(duration_sec semua fold selesai) + refit_duration_sec) / 60.0
 params = postprocess(oof) or {}
 scores = compute_scores(...)
 simpan oof / test_pred / scores / postprocess; report; leaderboard (kecuali debug)
@@ -226,26 +252,44 @@ exception di mana pun → tulis FAILED + traceback, lempar ulang
 
 Helper: `refit_iterations()` = `round(mean(best_iteration) × refit_iter_mult)` atau `None`.
 
-### 5.3 Skor
+### 5.3 Skor (konsisten lintas semua run di `eval_folds`)
 
-- `cv_raw`: metric atas seluruh OOF (threshold 0.5 / argmax), `cv_std`: std skor per fold.
-- Jika `postprocess` mengembalikan params tidak kosong:
-  - `cv_post`: params dari OOF penuh, dinilai di OOF yang sama (**optimistis**).
-  - `cv_honest`: untuk tiap fold k, params dari OOF fold sumber (non-timeseries: fold ≠ k; timeseries: fold < k, sehingga fold 0 dilewati), dinilai di fold k.
-  - Untuk timeseries, `cv_raw`/`cv_post` juga dilaporkan pada subset fold ≥ 1 di `scores.json` supaya sebanding; `n_rows_eval` dicatat.
-  - Catatan: pada non-timeseries, `cv_honest` masih sedikit optimistis karena model fold lain dilatih memakai fold k.
-- Tanpa params: `cv_post` dan `cv_honest` kosong (NaN).
+- `eval_folds` ditentukan **hanya oleh `cv_strategy`**, bukan oleh apakah `postprocess` di-override:
+  - non-timeseries: semua fold (`[0..n_folds-1]`).
+  - timeseries: selalu fold ≥ 1 (`[1..n_folds-1]`), karena fold 0 tidak punya fold masa lalu untuk evaluasi honest.
+- Semua skor utama (`cv_raw`, `cv_post`, `cv_honest`, dan `cv`) **selalu dihitung pada baris OOF di `eval_folds`** (yang sudah selesai / tidak NaN), sehingga setiap run pada dataset yang sama dinilai pada populasi baris yang persis sama (`n_rows_eval`):
+  - `cv_raw`: metric pada `eval_folds` tanpa params (threshold 0.5 / argmax).
+  - Jika `postprocess` mengembalikan params tidak kosong:
+    - `cv_post`: params dari OOF penuh, dinilai pada `eval_folds` (**optimistis**).
+    - `cv_honest`: untuk tiap fold $k \in \text{eval\_folds}$, params dioptimasi pada fold sumber honest (non-timeseries: fold aktif $\neq k$; timeseries: fold aktif $< k$, termasuk fold 0), lalu dinilai di fold $k$.
+    - Catatan: pada non-timeseries, `cv_honest` masih sedikit optimistis karena model fold lain dilatih memakai fold $k$.
+  - Jika `postprocess` mengembalikan `{}` (tidak di-override): `cv_post = cv_honest = cv_raw` (ketiganya bernilai sama, bukan NaN, dan pass honest per fold tidak perlu dijalankan ulang).
+  - `cv` (kolom ranking di `leaderboard.csv`) selalu = `cv_honest`.
+  - `cv_raw_all`: metric raw di seluruh fold aktif (termasuk fold 0 pada timeseries), dicatat di `scores.json` sebagai informasi tambahan.
 
-`scores.json`: `metric`, `direction`, `per_fold` (skor + n_rows), `cv_raw`, `cv_std`, `cv_post`, `cv_honest`, `eval_folds`, `n_rows_eval`, `folds_hash`, `test_ids_hash`, `classes`, `status`, `n_folds_done`.
+`scores.json`: `model`, `timestamp`, `owner`, `minutes`, `data_hash`, `metric`, `direction`, `per_fold` (skor + n_rows + duration_sec), `refit_duration_sec`, `cv`, `cv_raw`, `cv_post`, `cv_honest`, `cv_std`, `cv_raw_all`, `eval_folds`, `n_rows_eval`, `folds_hash`, `test_ids_hash`, `classes`, `status`, `test_pred_source`, `n_folds_done`.
 
-### 5.4 Batas waktu & resume
+### 5.4 Batas waktu, `refit_full`, & resume
 
-- `max_minutes`: dicek **sebelum** memulai tiap fold. Jika terlampaui, fold sisanya dilewati, status `partial`, file `PARTIAL` ditulis, OOF fold yang belum jalan = NaN. Pemotongan di tengah fold (per epoch) adalah tanggung jawab modul image/text.
-- `resume_from=<run_dir>`: memakai folder dan `folds.csv` run tersebut; fold yang file `fold_preds`-nya sudah ada di-load, tidak dilatih ulang. Config inti (task, target, metric, n_folds, cv_strategy) harus sama → jika berbeda `ConfigError` dengan perbaikan.
+- **Pemisahan `status` vs `test_pred_source`:**
+  - `status ∈ {"ok", "partial"}` **hanya** ditentukan oleh apakah seluruh fold aktif selesai (`n_folds_done == n_active_folds`). File `PARTIAL` hanya ada jika `status == "partial"`, dan dihapus otomatis saat `resume_from` menuntaskan fold sisanya.
+  - `test_pred_source ∈ {"fold_avg", "refit", "fold_avg_fallback"}` mencatat asal `test_pred`. Melewati `refit_full` karena sisa waktu tidak cukup **tidak** mengubah `status` menjadi `partial` (sehingga run timeseries yang seluruh fold-nya selesai tetap berstatus `ok` dan tetap muncul di `compare_runs`), melainkan mencatat `test_pred_source = "fold_avg_fallback"`.
+- `max_minutes` (**berlaku per sesi `run()`**, bukan akumulatif lintas sesi resume; sedangkan `minutes` yang tercatat di `scores.json` & leaderboard adalah **jumlah `duration_sec` semua fold selesai ditambah `refit_duration_sec`**, bukan hanya durasi sesi terakhir):
+  1. Dicek **sebelum** memulai tiap fold terhadap waktu yang berjalan di sesi `run()` saat ini. Jika waktu sesi ≥ `max_minutes`, fold sisanya dilewati, `status = "partial"`, file `PARTIAL` ditulis, OOF fold yang belum jalan = NaN.
+  2. Sebelum `refit_full`: jika `status == "partial"` **atau** sisa waktu sesi `< max(duration_sec fold selesai) × 1.25` (memakai durasi fold **terbesar**, karena pada timeseries expanding window fold terakhir paling besar dan mendekati ukuran full train), `refit_full` dilewati, muncul warning keras bahwa prediksi test bukan hasil refit, `test_pred_source = "fold_avg_fallback"`, dan `test_pred` memakai **rata-rata `te_pred` dari fold yang selesai**.
+  3. Pemotongan di tengah fold (per epoch) adalah tanggung jawab modul image/text.
+- `resume_from=<run_dir>`:
+  - Memakai folder dan `folds.csv` run tersebut; untuk setiap fold yang memiliki `fold_preds/fold{k}_{oof,test}.parquet` dan `fold{k}_info.json`, ketiganya di-load ke memori (`fold_info[k]` terisi kembali termasuk `best_iteration` dan `duration_sec`, begitu pula `importances` per fold).
+  - **Validasi penuh `config.json`:** membandingkan **seluruh** `config.json` yang tersimpan di folder run terhadap config sekarang setelah `resolve()`, **kecuali** `max_minutes`, `resume_from`, `notes`, `runs_dir`, dan `owner` (diabaikan agar run dari laptop A yang di-resume di PC GPU tidak gagal karena perbedaan `hostname`; nilai `owner` dan `timestamp` awal dipertahankan dari run asal). Jika ada field lain yang berbeda (termasuk hyperparameter model atau `extra`), lempar `ConfigError` dengan perbaikan ("kembalikan parameter config seperti semula, atau jalankan sebagai run baru dengan `resume_from=None`") agar fold lama dan fold baru tidak pernah mencampur model/fitur yang berbeda.
+  - Catatan di README: kode di dalam hook (`build_features`, `fit_transform_fold`, `build_model`) tidak boleh diubah di antara resume karena perubahan kode hook tidak dapat dideteksi dari `config.json`.
 
-### 5.5 Debug
+### 5.5 Debug (Subsample Sadar-Struktur CV)
 
-`debug=True` → subsample ≤ 2000 baris, `n_folds=2`, `folds_path` dan `resume_from` diabaikan, folder `runs/_debug/`, tidak masuk leaderboard.
+`debug=True` → `n_folds=2`, `folds_path` dan `resume_from` diabaikan, folder `runs/_debug/`, tidak masuk leaderboard. Subsample hingga maksimal `N = 2000` baris dilakukan sesuai `cv_strategy` (dengan `fold_seed`) agar tidak pernah memicu `DataError`:
+- `timeseries`: urutkan berdasarkan `time_col`, ambil periode-periode unik paling akhir (ekor deret waktu) secara **utuh per periode** hingga ≤ 2000 baris, dengan jaminan minimal `n_folds + 1` (3) periode unik.
+- `group` / `stratified_group`: sample grup secara **utuh** (semua baris dalam grup terpilih ikut diambil) hingga ≤ 2000 baris, dengan jaminan minimal `n_folds` grup per kelas (untuk `stratified_group`) atau `n_folds` grup total (untuk `group`).
+- `stratified`: stratified sample proporsional hingga ≤ 2000 baris dengan jaminan setiap kelas memiliki minimal `n_folds` baris.
+- `kfold`: random sample ≤ 2000 baris.
 
 ### 5.6 `RunResult`
 
@@ -302,13 +346,13 @@ Warning (tidak menghentikan run): `time_col` tanpa `timeseries`; target/group/ti
 
 ## 8. Testing (`pytest tests/core/`, data sintetis, CPU, offline)
 
-- `test_io.py` — `canon_id` menyamakan `7`/`"7"`/`7.0`, `True`/`1`/`1.0`; int64 18 digit tidak bertabrakan; `canon_hash` tidak terpengaruh urutan baris dan float32/float64.
-- `test_config.py` — auto-resolve (stratified, kfold, group, stratified_group, refit_full); warning `time_col`; `validate` gagal dengan pesan berisi "[Perbaikan]".
+- `test_io.py` — `canon_id` ter-vektorisasi per dtype menyamakan `7`/`"7"`/`7.0`, `True`/`1`/`1.0`; int64 18 digit tidak bertabrakan; `canon_hash` tidak terpengaruh urutan baris dan float32/float64; `fast_df_hash` cepat dan deterministik.
+- `test_config.py` — auto-resolve (`owner` dari `socket.gethostname()`, stratified, kfold, group, stratified_group, refit_full); warning `time_col`; `validate` gagal dengan pesan berisi "[Perbaikan]".
 - `test_metrics.py` — built-in cocok dengan sklearn; threshold/argmax + classes string; metric custom.
-- `test_cv.py` — tiap strategi; timeseries panel tidak terbelah, `ts_gap` dihormati, train kosong → `DataError`; reuse fold identik meski baris diacak; `fold_seed` vs `seed`; mismatch → `FoldMismatchError` berisi "[Perbaikan]".
-- `test_run.py` — artefak lengkap; leaderboard kolom & `cv` ranking; `update_lb_score`; `FAILED`; debug di `_debug` tanpa leaderboard.
-- `test_pipeline.py` — binary/multiclass/regression/timeseries end-to-end dengan model sklearn; refit dengan scaler di `fit_transform_fold` (va kosong); `build_features` drop baris → `HookContractError`; ubah target → warning; drop `va` → `HookContractError`; `max_minutes` kecil → status partial + leaderboard `partial`; `resume_from` melewati fold yang sudah ada; skor honest (fold ≠ k vs fold < k, `test_df=None`); `make_submission` mengikuti urutan `sample_sub` dan menolak id berbeda.
-- `test_report.py` — `summary.md` dan plot terbentuk untuk klasifikasi & regresi; error render tidak menggagalkan run.
+- `test_cv.py` — tiap strategi; timeseries panel tidak terbelah, `ts_gap` dihormati, train kosong → `DataError`; `make_folds_file` menulis `folds/folds.csv` + `folds/folds_meta.json` (`source_run="standalone"`) yang bisa langsung dipakai via `folds_path="folds/folds.csv"`; reuse fold identik meski baris diacak; `fold_seed` vs `seed`; mismatch → `FoldMismatchError` berisi "[Perbaikan]".
+- `test_run.py` — artefak lengkap; `owner` masuk ke nama folder + timezone `Asia/Jakarta`; `run_dir` relatif; leaderboard kolom (`status`, `test_pred_source`, `owner`, `minutes`, `model`) & `cv` ranking; `append_leaderboard` melakukan upsert berdasarkan `run_dir`; `update_lb_score` menulis `lb.json` di folder run + meng-update CSV; **hapus `leaderboard.csv` lalu jalankan `sync_leaderboard()` dan pastikan hasilnya identik dengan sebelum dihapus**; `FAILED`; debug di `_debug` tanpa leaderboard.
+- `test_pipeline.py` — binary/multiclass/regression/timeseries end-to-end dengan model sklearn; refit dengan scaler di `fit_transform_fold` (va kosong); `build_features` drop baris → `HookContractError`; ubah target → warning; drop `va` → `HookContractError`; `max_minutes` kecil di tengah fold → `status="partial"` + `test_pred_source="fold_avg_fallback"` saat `refit_full`; semua fold selesai tapi sisa waktu `< 1.25 × max(durasi_fold)` sebelum refit → refit dilewati + warning + `status` tetap `"ok"` + `test_pred_source="fold_avg_fallback"` (tetap muncul di `compare_runs`); `resume_from` melewati fold yang sudah ada, memuat ulang `fold{k}_info.json`, menghapus `PARTIAL` saat tuntas, dan melakukan upsert leaderboard; `resume_from` menolak perubahan config selain `max_minutes`/`resume_from`/`notes` dengan `ConfigError`; `debug=True` aman untuk kelas langka, group CV, dan timeseries; skor `cv_raw`, `cv_post`, `cv_honest` selalu di `eval_folds` yang sama (`cv_post = cv_honest = cv_raw` bila tanpa `postprocess`); `make_submission` mengikuti urutan `sample_sub` dan menolak id berbeda.
+- `test_report.py` — `summary.md` dan plot terbentuk untuk klasifikasi & regresi; `compare_runs` secara default menyaring hanya `status == "ok"`; error render tidak menggagalkan run.
 - `test_ensemble.py` — `mean` & `weights` + tiga skor; beda `folds_hash`/test id → `FoldMismatchError`; NaN partial/timeseries ditangani.
 
 ---
