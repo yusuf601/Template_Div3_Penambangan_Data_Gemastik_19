@@ -67,3 +67,19 @@ def test_builtin_metrics_and_custom_registration():
 
     with pytest.raises(ConfigError, match=r"\[Perbaikan\]"):
         get_metric("nonexistent_metric_xyz")
+
+
+def test_non_zero_indexed_integer_classes():
+    # Multiclass with integer classes [1, 2, 3]
+    classes_mc = [1, 2, 3]
+    ym_true = np.array([1, 2, 3, 2])
+    ym_prob = np.array([[0.8, 0.1, 0.1], [0.1, 0.7, 0.2], [0.1, 0.2, 0.7], [0.2, 0.6, 0.2]])
+    assert score(ym_true, ym_prob, "f1_macro", task="multiclass", classes=classes_mc) == pytest.approx(1.0)
+    assert score(ym_true, ym_prob, "accuracy", task="multiclass", classes=classes_mc) == pytest.approx(1.0)
+
+    # Binary with non-zero-indexed integer classes [1, 2]
+    classes_bin = [1, 2]
+    yb_true = np.array([1, 1, 2, 2])
+    yb_prob = np.array([0.1, 0.4, 0.7, 0.9])
+    assert score(yb_true, yb_prob, "f1", task="binary", classes=classes_bin) == pytest.approx(1.0)
+    assert score(yb_true, yb_prob, "auc", task="binary", classes=classes_bin) == pytest.approx(1.0)

@@ -227,9 +227,8 @@ def score(
         if m.input_type == "label":
             idx = np.argmax(yr, axis=1) if yr.ndim == 2 else yr.astype(int)
             if classes is not None:
-                classes_arr = np.asarray(classes, dtype=object)
-                y_pred_lbl = classes_arr[idx]
-                return float(m.fn(yt.astype(object) if yt.dtype.kind in ("U", "S", "O") else yt, y_pred_lbl))
+                yt_idx = _map_to_class_indices(yt, classes)
+                return float(m.fn(yt_idx, idx))
             return float(m.fn(yt, idx))
 
         if m.input_type == "proba":
@@ -250,7 +249,7 @@ def score(
         return float(m.fn(yt, yr))
 
     if task == "binary":
-        if classes is not None and len(classes) == 2 and not np.issubdtype(yt.dtype, np.number):
+        if classes is not None and len(classes) == 2:
             yt_eval = _map_to_class_indices(yt, classes)
         else:
             yt_eval = yt
