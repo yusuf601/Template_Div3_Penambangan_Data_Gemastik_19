@@ -37,6 +37,14 @@ from utils.core.metrics import (
     register_metric,
     score,
 )
+from utils.core.report import compare_runs, generate_report
+from utils.core.run import (
+    LEADERBOARD_COLS,
+    RunManager,
+    safe_name,
+    sync_leaderboard,
+    update_lb_score,
+)
 from utils.core.seed import seed_everything
 
 __all__ = [
@@ -70,4 +78,11 @@ __all__ = [
     "make_folds_file",
     "split_fold",
     "debug_subsample",
+    "LEADERBOARD_COLS",
+    "safe_name",
+    "RunManager",
+    "update_lb_score",
+    "sync_leaderboard",
+    "generate_report",
+    "compare_runs",
 ]
