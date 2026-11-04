@@ -19,7 +19,13 @@ Template standar kompetisi penambangan data berbasis **`utils.core` (Core-lite U
    - [OOF Blending & Ensembling](#e-oof-blending--ensembling)
    - [Generasi Submission](#f-generasi-submission)
 5. [Struktur Folder & Hasil Run](#5-struktur-folder--hasil-run)
-6. [Testing & Verifikasi](#6-testing--verifikasi)
+6. [Modalitas Teks (utils.text)](#6-modalitas-teks-utilstext)
+   - [TextConfig & Preprocessing](#a-textconfig--preprocessing)
+   - [TfidfPipeline](#b-tfidfpipeline-sparse--classical-ml)
+   - [TransformerPipeline](#c-transformerpipeline-deep-learning-offline)
+   - [Multi-label Recipe & Shared Folds](#d-multi-label-recipe--shared-folds-run_multilabel)
+   - [Error Analysis](#e-error-analysis)
+7. [Testing & Verifikasi](#7-testing--verifikasi)
 
 ---
 
@@ -201,10 +207,123 @@ runs/
 
 ---
 
-## 6. Testing & Verifikasi
+## 6. Modalitas Teks (utils.text)
 
-Seluruh komponen `utils.core` telah dilengkapi dengan test suite lengkap (unit dan contract tests):
+Modul `utils.text` dibangun di atas `utils.core` dengan filosofi **offline-first**, deterministik, dan anti-leakage untuk kompetisi NLP / Text Mining.
+
+### A. TextConfig & Preprocessing
+
+`TextConfig` mewarisi `BaseConfig` dengan validasi parameter spesifik NLP:
+- `clean_mode`: `"none"`, `"minimal"` (menjaga casing/punctuation), atau `"aggressive"` (lowercasing, slang normalization via map kamus slang bahasa Indonesia, regex sanitization).
+- `stateless_features`: Ekstraksi statistik teks bebas data leakage (`char_length`, `word_count`, `digit_ratio`, dll) serta pair stats (`len_diff`, `jaccard_similarity`, `levenshtein_distance`).
+
+### B. TfidfPipeline (Sparse & Classical ML)
+
+Pipeline klasikal berbasis TF-IDF (`TfidfPipeline`) bekerja langsung dengan sparse CSR matrix tanpa densifikasi untuk efisiensi memori (RAM-friendly):
+- Pilihan `estimator`: `"ridge"`, `"logistic"`, `"lgbm"`, `"sgd"`, `"linear_svm"`.
+- Mendukung fitur pair teks (`text_pair_col`) dengan TF-IDF Cosine Similarity otomatis.
+- Menjamin alignment K-kolom probabilitas konsisten pada validasi/test saat terdapat kelas langka pada fold tertentu.
+
+```python
+from utils.text import TextConfig, TfidfPipeline
+
+cfg = TextConfig(
+    run_name="tfidf_baseline",
+    task="binary",
+    target="label",
+    metric="f1_macro",
+    estimator="logistic",
+    clean_mode="aggressive",
+    tfidf_max_features=10000,
+    n_folds=5,
+)
+pipe = TfidfPipeline(cfg)
+result = pipe.run(train_df, test_df)
+```
+
+### C. TransformerPipeline (Deep Learning Offline)
+
+`TransformerPipeline` mendukung fine-tuning model HuggingFace lokal (PyTorch) secara offline:
+- **Offline Guard:** `validate_local_model_dir` memeriksa kelengkapan file weights dan tokenizer secara instan sebelum training dimulai.
+- **Backbone Freezing:** Opsi `freeze_backbone=True` dan `unfreeze_last_n_layers` untuk pelatihan cepat atau transfer learning.
+- **Dynamic Batch Collator:** Padding dinamis per-batch (`make_dynamic_collator`) menghemat VRAM hingga ~40% dibandingkan static max_length.
+- **Precision:** Mendukung `"fp32"`, `"fp16"`, dan `"bf16"` (menggunakan `torch.amp.autocast`).
+- **Emergency Truncation & Profiling:** Batch profiling otomatis memprediksi runtime per fold.
+
+```python
+from utils.text import TextConfig, TransformerPipeline
+
+cfg = TextConfig(
+    run_name="indobert_run",
+    task="multiclass",
+    target="category",
+    metric="f1_macro",
+    model_name_or_path="models/indobert-base-p1",  # Direktori lokal
+    local_files_only=True,
+    max_length=128,
+    train_batch_size=16,
+    eval_batch_size=32,
+    gradient_accumulation_steps=2,
+    precision="fp16",
+    epochs=3,
+    n_folds=5,
+)
+pipe = TransformerPipeline(cfg)
+result = pipe.run(train_df, test_df)
+```
+
+### D. Multi-label Recipe & Shared Folds (`run_multilabel`)
+
+Untuk kompetisi multi-label (Binary Relevance), `run_multilabel` melatih model independen per target label dan memastikan pembagian fold konsisten melalui `folds_dir`:
+
+```python
+from utils.text import TextConfig, TfidfPipeline, run_multilabel
+
+cfg = TextConfig(
+    run_name="multilabel_tfidf",
+    task="binary",
+    target="dummy",
+    metric="auc",
+    estimator="logistic",
+    n_folds=5,
+)
+
+results = run_multilabel(
+    TfidfPipeline,
+    cfg,
+    train_df,
+    test_df,
+    target_cols=["toxic", "severe_toxic", "obscene", "threat"],
+    folds_dir="folds",  # Folds disimpan per-label: folds/{label}/folds.csv
+    sample_sub=sample_sub_df,
+    sub_path="runs/multilabel_submission.csv",
+)
+```
+
+> [!TIP]
+> Dengan menyimpan split fold di `folds/{label}/folds.csv`, arsitektur model berbeda (misal `TfidfPipeline` dan `TransformerPipeline`) akan menggunakan partisi data yang persis sama untuk setiap label, sehingga hasil OOF dapat langsung digabungkan menggunakan `utils.core.blend` tanpa terjadi `FoldMismatchError`.
+
+### E. Error Analysis
+
+Gunakan `extract_top_errors` untuk mengidentifikasi sampel dengan residual/loss prediksi terbesar untuk iterasi error analysis:
+
+```python
+from utils.text import extract_top_errors
+
+err_df = extract_top_errors(result, train_df, n=20)
+# Menyimpan hasil otomatis ke <run_dir>/error_analysis.csv
+```
+
+---
+
+## 7. Testing & Verifikasi
+
+Seluruh komponen `utils.core` dan `utils.text` telah dilengkapi dengan test suite lengkap (unit dan contract tests):
 
 ```bash
+# Test Core Pipeline
 pytest tests/core/ -v
+
+# Test Text Modality Suite
+pytest tests/text/ -v
 ```

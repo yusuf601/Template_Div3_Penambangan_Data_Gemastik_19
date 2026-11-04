@@ -239,7 +239,8 @@ def generate_report(
         raw_str = f"{float(raw_v):.6f}" if raw_v is not None and not pd.isna(raw_v) else "NaN"
         n_r = f_info.get("n_rows", 0)
         dur = float(f_info.get("duration_sec", 0.0))
-        lines.append(f"| {k} | {raw_str} | {n_r} | {dur:.2f} |")
+        fold_lbl = f"{k} (truncated)" if f_info.get("truncated") else f"{k}"
+        lines.append(f"| {fold_lbl} | {raw_str} | {n_r} | {dur:.2f} |")
 
     if importances is not None and len(importances) > 0:
         top_imp = importances.dropna().sort_values(ascending=False).head(20)

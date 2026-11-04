@@ -15,7 +15,7 @@ EXPECTED_EXPORTS = [
     "make_folds", "save_folds", "load_folds", "get_folds",
     "make_folds_file", "split_fold", "debug_subsample",
     # Task 4: run + report
-    "LEADERBOARD_COLS", "RunManager", "update_lb_score", "sync_leaderboard",
+    "LEADERBOARD_COLS", "safe_name", "RunManager", "update_lb_score", "sync_leaderboard",
     "generate_report", "compare_runs",
     # Task 5: pipeline
     "REFIT_TIME_MARGIN", "compute_scores", "RunResult", "BasePipeline",

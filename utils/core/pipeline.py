@@ -88,11 +88,14 @@ def compute_scores(
             clip_range=clip_range,
         )
         info_k = fold_info.get(k, fold_info.get(str(k), {})) or {}  # type: ignore[arg-type]
-        per_fold[str(k)] = {
+        entry_k: dict[str, Any] = {
             "raw": float(raw_k),
             "n_rows": int(len(fk_df)),
             "duration_sec": float(info_k.get("duration_sec", 0.0)),
         }
+        if bool(info_k.get("truncated", False)):
+            entry_k["truncated"] = True
+        per_fold[str(k)] = entry_k
 
     n_folds_done = int(len(per_fold))
     eval_fold_vals = [
@@ -374,6 +377,11 @@ class BasePipeline:
         self.importances: Optional[pd.Series] = None
         self.classes_: Optional[list[Any]] = None
         self._clock: Callable[[], float] = time.monotonic
+        self._run_start: float = 0.0
+
+    def estimate_fold_seconds(self, completed_folds: list[int]) -> float:
+        """Estimate seconds required for the next fold based on completed_folds."""
+        return 0.0
 
     # --- 3 Primary Hooks ---
 
@@ -566,6 +574,7 @@ class BasePipeline:
                 "Jangan membuang atau menambah baris te di dalam fit_transform_fold.",
             )
 
+        seed_everything(self.cfg.seed)
         model = self.build_model(-1)
         _, _, te_pred = self.fit_predict_fold(model, tr_f, va_f, te_f, -1)
 
@@ -588,6 +597,7 @@ class BasePipeline:
         self.cfg.validate()
         seed_everything(self.cfg.seed)
         session_start = self._clock()
+        self._run_start = session_start
 
         rm = RunManager(self.cfg, model_name=self.model_name)
         self.cfg = copy.deepcopy(rm.cfg)
@@ -776,9 +786,11 @@ class BasePipeline:
 
                 if len(completed_folds) >= 1 and self.cfg.max_minutes is not None:
                     elapsed_sec = self._clock() - session_start
-                    if elapsed_sec >= self.cfg.max_minutes * 60.0:
+                    rem_sec = self.cfg.max_minutes * 60.0 - elapsed_sec
+                    est_sec = float(self.estimate_fold_seconds(completed_folds))
+                    if rem_sec <= 0.0 or rem_sec < est_sec:
                         rm.log(
-                            f"Stopping before fold {k}: elapsed {elapsed_sec:.1f}s >= max_minutes ({self.cfg.max_minutes}m)"
+                            f"Stopping before fold {k}: remaining {rem_sec:.1f}s < required {est_sec:.1f}s (max_minutes={self.cfg.max_minutes}m)"
                         )
                         break
 
@@ -817,6 +829,7 @@ class BasePipeline:
                         "Dilarang membuang/menambah baris pada te di dalam fit_transform_fold.",
                     )
 
+                seed_everything(self.cfg.seed + max(int(k), 0))
                 model = self.build_model(k)
                 model, va_pred, te_pred = self.fit_predict_fold(
                     model, tr_f, va_f, te_f, k

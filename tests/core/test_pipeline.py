@@ -305,3 +305,61 @@ def test_additional_pipeline_guards_debug_and_submission_nan(tmp_path):
         )
     ).run(tr_qwk, te_qwk)
     assert qwk_res.scores["status"] == "ok"
+
+
+def test_core_pre_fold_estimate_per_fold_seed_and_truncated_report(tmp_path):
+    tr, te = make_bin_df(45)
+    clock = FakeClock(start=10.0)
+    recorded_starts = []
+    fold_random_Draws = {}
+
+    class GuardedPipe(SklearnBinaryPipe):
+        def estimate_fold_seconds(self, completed_folds):
+            return max(self.fold_info[fk].get("duration_sec", 0.0) for fk in completed_folds) * 1.1
+
+        def build_model(self, fold):
+            recorded_starts.append(self._run_start)
+            fold_random_Draws[fold] = float(np.random.rand())
+            return super().build_model(fold)
+
+        def fit_predict_fold(self, model, tr_df, va_df, te_df, fold):
+            clock.advance(40.0)
+            if fold == 0:
+                self.fold_info[fold]["truncated"] = True
+            return super().fit_predict_fold(model, tr_df, va_df, te_df, fold)
+
+    # max_minutes=1.2 (72s): fold 0 takes 40s -> rem_sec=32s < est_sec (40s * 1.1 = 44s) -> stops before fold 1!
+    cfg_part = BaseConfig(
+        run_name="guard_part", task="binary", target="y", metric="auc",
+        n_folds=3, max_minutes=1.2, runs_dir=str(tmp_path),
+    )
+    pipe_part = GuardedPipe(cfg_part)
+    pipe_part._clock = clock
+    r_part = pipe_part.run(tr, te)
+
+    assert recorded_starts == [10.0]
+    assert r_part.scores["status"] == "partial"
+    assert r_part.scores["n_folds_done"] == 1
+    assert r_part.scores["per_fold"]["0"].get("truncated") is True
+    assert "0 (truncated)" in (r_part.run_dir / "summary.md").read_text(encoding="utf-8")
+
+    # Resume and verify fold 1 RNG draw matches an uninterrupted full run's fold 1 RNG draw
+    cfg_res = BaseConfig(
+        run_name="guard_part", task="binary", target="y", metric="auc",
+        n_folds=3, max_minutes=10.0, resume_from=str(r_part.run_dir), runs_dir=str(tmp_path),
+    )
+    pipe_res = GuardedPipe(cfg_res)
+    pipe_res._clock = clock
+    pipe_res.run(tr, te)
+    draw_fold1_resumed = fold_random_Draws[1]
+
+    fold_random_Draws.clear()
+    cfg_full = BaseConfig(
+        run_name="guard_full", task="binary", target="y", metric="auc",
+        n_folds=3, max_minutes=10.0, runs_dir=str(tmp_path),
+    )
+    pipe_full = GuardedPipe(cfg_full)
+    pipe_full._clock = clock
+    pipe_full.run(tr, te)
+    assert draw_fold1_resumed == fold_random_Draws[1]
+
