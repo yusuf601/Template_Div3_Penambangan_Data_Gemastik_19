@@ -8,6 +8,7 @@ Template standar kompetisi penambangan data berbasis **`utils.core` (Core-lite U
 
 1. [Persiapan Lingkungan (Setup & Installation)](#1-persiapan-lingkungan-setup--installation)
    - [Instalasi Dependencies](#instalasi-dependencies)
+   - [Download Model Transformer Offline (RTX 3070 8GB)](#download-model-transformer-offline-rtx-3070-8gb)
    - [Setup Local LLM (Ollama)](#setup-local-llm-ollama)
 2. [Arsitektur & Konsep utils.core](#2-arsitektur--konsep-utilscore)
 3. [Quickstart (Contoh Cepat End-to-End)](#3-quickstart-contoh-cepat-end-to-end)
@@ -40,6 +41,26 @@ uv pip install -r requirements.txt
 # atau
 pip install -r requirements.txt
 ```
+
+### Download Model Transformer Offline (RTX 3070 8GB)
+
+Sesuai spesifikasi PC lomba (**Intel Core i7-12700, RAM 32 GB DDR5, 1 TB NVMe SSD, NVIDIA GeForce RTX 3070 LHR 8 GB VRAM**), unduh **4 model Tier Utama** (~2.4 GB total) ke `assets/models/` sebelum lomba agar siap dijalankan secara 100% offline (`local_files_only=True`):
+
+| # | Model HuggingFace | Direktori Lokal (`model_name_or_path`) | Ukuran | Peran Utama | VRAM & Waktu (5-Fold `bf16`) |
+| :-: | :--- | :--- | :---: | :--- | :--- |
+| **1** | `indobenchmark/indobert-base-p1` | `assets/models/indobert-base-p1` | ~440 MB | Baseline utama bahasa Indonesia formal/berita/umum (WordPiece) | ~2.8 GB (`bs=16, len=256`), ~10–15 mnt |
+| **2** | `indolem/indobertweet-base-uncased` | `assets/models/indobertweet-base-uncased` | ~440 MB | Spesialis sosmed, ulasan e-commerce, komentar netizen, slang | ~2.8 GB (`bs=16, len=128–256`), ~8–14 mnt |
+| **3** | `LazarusNLP/NusaBERT-base` *(atau `indobert-base-p2`)* | `assets/models/nusabert-base` | ~440 MB | Kosakata lebih baru & lintas bahasa daerah/nusantara | ~2.8 GB (`bs=16, len=256`), ~10–15 mnt |
+| **4** | `microsoft/mdeberta-v3-base` | `assets/models/mdeberta-v3-base` | ~1.1 GB | Pasangan ensemble terbaik untuk IndoBERT (DeBERTa-v3 + SentencePiece; kuat di *text-pair* & *code-mixing*) | ~5.5–6.5 GB (`bs=8, accum=2, len=256`), ~20–30 mnt |
+
+```bash
+huggingface-cli download indobenchmark/indobert-base-p1 --local-dir assets/models/indobert-base-p1
+huggingface-cli download indolem/indobertweet-base-uncased --local-dir assets/models/indobertweet-base-uncased
+huggingface-cli download LazarusNLP/NusaBERT-base --local-dir assets/models/nusabert-base
+huggingface-cli download microsoft/mdeberta-v3-base --local-dir assets/models/mdeberta-v3-base
+```
+
+> Panduan lengkap Model Cards, skrip verifikasi offline otomatis, dan konfigurasi per model tersedia di **[`docs/offline_models.md`](docs/offline_models.md)**.
 
 ### Setup Local LLM (Ollama)
 
@@ -119,14 +140,19 @@ sub_df = result.make_submission(sample_sub, "runs/submission.csv")
 
 ### A. BaseConfig (Manajemen Konfigurasi)
 
-`BaseConfig` otomatis memvalidasi parameter saat inisialisasi:
-- **Parameter Wajib:** `run_name`, `target`.
-- **Parameter Umum:**
-  - `task`: `"binary"`, `"multiclass"`, `"regression"`, `"multilabel"`.
-  - `metric`: `"rmse"`, `"mae"`, `"logloss"`, `"auc"`, `"f1_macro"`, `"qwk"`, dll.
-  - `cv_strategy`: `"stratified"`, `"kfold"`, `"group"`, `"timeseries"`.
+`BaseConfig` (dan turunannya `TextConfig`) otomatis memvalidasi dan me-*resolve* parameter saat `pipeline.run()` dipanggil:
+- **Parameter Wajib:** `task` (`"binary"`, `"multiclass"`, `"regression"`), `target`, dan `metric`.
+- **Parameter CV & Eksekusi:**
+  - `cv_strategy`: `"stratified"`, `"kfold"`, `"group"`, `"stratified_group"`, `"timeseries"` (otomatis dipilih jika `None`).
   - `n_folds`: Jumlah split cross-validation (default `5`).
-  - `max_minutes`: Batas waktu running sebelum time-budget guard aktif.
+  - `folds_path`: Path ke `folds/folds.csv` agar seluruh model menggunakan split CV yang identik.
+  - `test_mode`: `"fold_avg"` (rata-rata semua fold) atau `"refit_full"` (latih ulang pada 100% train menggunakan `refit_iter_mult`).
+  - `max_minutes`: Batas waktu running sebelum *Two-Tier Time-Budget Guard* aktif.
+  - `debug`: Jika `True`, otomatis memotong data maks 2.000 baris (`n_folds=2`) dan menyimpan hasil ke `runs/_debug/`.
+
+> [!IMPORTANT]
+> **Dokumentasi Lengkap Pengaturan Training & File `.json`:**
+> Penjelasan menyeluruh tentang seluruh parameter `BaseConfig` & `TextConfig`, struktur semua file `.json` (`config.json`, `scores.json`, `folds_meta.json`, `data_version.json`, `postprocess.json`, `lb.json`, `fold{k}_info.json`, serta kamus `slang_id.json` & `emoji_map.json`), dan resep alur kerja lomba tersedia di **[`docs/training_and_config_guide.md`](docs/training_and_config_guide.md)**.
 
 ### B. BasePipeline (Siklus Hidup & Hooks)
 
@@ -190,19 +216,24 @@ sub_df = result.make_submission(sample_sub_df, path="runs/final_sub.csv")
 
 ## 5. Struktur Folder & Hasil Run
 
-Setelah menjalankan pipeline, direktori output akan terbentuk seperti berikut:
+Setelah menjalankan pipeline, direktori output akan terbentuk seperti berikut (lihat penjelasan detail isi setiap file `.json` di **[`docs/training_and_config_guide.md`](docs/training_and_config_guide.md#3-referensi-lengkap-seluruh-file-json-di-proyek)**):
 
-```
+```text
 runs/
 ├── leaderboard.csv                  # Tabel performa seluruh run
 └── <timestamp>_<owner>_<modality>_<run_name>/
-    ├── config.json                  # Konfigurasi lengkap run
-    ├── scores.json                  # Metrik evaluasi (cv, raw, per-fold)
-    ├── report.html                  # Slide deck laporan visual & diagnostik
-    ├── fold0_oof.parquet            # Prediksi validasi per-fold
-    ├── fold0_test.parquet           # Prediksi test per-fold
+    ├── config.json                  # Snapshot konfigurasi lengkap (extra["_text"] untuk TextConfig)
+    ├── data_version.json            # Hash & dimensi dataset train/test
+    ├── folds.csv                    # Pembagian fold per ID
+    ├── folds_meta.json              # Hash & metadata partisi CV (diverifikasi saat blend)
+    ├── postprocess.json             # Parameter post-processing (mis. threshold optimal)
+    ├── scores.json                  # Metrik evaluasi (cv, cv_raw, cv_post, cv_honest, per_fold)
+    ├── lb.json                      # Skor Public/Private LB (via update_lb_score)
     ├── oof.parquet                  # Gabungan Out-of-Fold utuh
-    └── test.parquet                 # Rata-rata prediksi test seluruh fold
+    ├── test_pred.parquet            # Prediksi test gabungan seluruh fold
+    ├── summary.md                   # Laporan ringkas Markdown
+    ├── plots/                       # Plot diagnostik (oof_dist.png, importance.png, dll.)
+    └── fold_preds/                  # Checkpoint instan per fold (fold{k}_oof/test.parquet & fold{k}_info.json)
 ```
 
 ---
@@ -214,14 +245,15 @@ Modul `utils.text` dibangun di atas `utils.core` dengan filosofi **offline-first
 ### A. TextConfig & Preprocessing
 
 `TextConfig` mewarisi `BaseConfig` dengan validasi parameter spesifik NLP:
-- `clean_mode`: `"none"`, `"minimal"` (menjaga casing/punctuation), atau `"aggressive"` (lowercasing, slang normalization via map kamus slang bahasa Indonesia, regex sanitization).
-- `stateless_features`: Ekstraksi statistik teks bebas data leakage (`char_length`, `word_count`, `digit_ratio`, dll) serta pair stats (`len_diff`, `jaccard_similarity`, `levenshtein_distance`).
+- `clean_mode`: `"none"`, `"minimal"` (normalisasi NFC, strip HTML, rapikan spasi), atau `"social_id"` (masking `<url>`/`<email>`/`<user>`, normalisasi slang bahasa Indonesia, serta peringkasan karakter berulang).
+- `emoji_mode`: `"keep"` (default, tanpa dependensi tambahan), `"strip"` (hapus seluruh sequence emoji atomik), atau `"map"` (petakan emoji univalen menggunakan `assets/dictionaries/emoji_map.json`).
+- `add_text_stats` & `add_pair_features`: Ekstraksi statistik teks bebas data leakage (`char_len`, `word_count`, `digit_ratio`, dll.) serta pair stats (`word_jaccard`, `char3_jaccard`, dll.).
 
 ### B. TfidfPipeline (Sparse & Classical ML)
 
 Pipeline klasikal berbasis TF-IDF (`TfidfPipeline`) bekerja langsung dengan sparse CSR matrix tanpa densifikasi untuk efisiensi memori (RAM-friendly):
-- Pilihan `estimator`: `"ridge"`, `"logistic"`, `"lgbm"`, `"sgd"`, `"linear_svm"`.
-- Mendukung fitur pair teks (`text_pair_col`) dengan TF-IDF Cosine Similarity otomatis.
+- Pilihan `estimator`: `"ridge"`, `"logistic"`, `"lgbm"`, `"sgd"`, `"linear_svc"`.
+- Mendukung fitur pair teks (`len(text_cols) >= 2`) dengan TF-IDF Cosine Similarity per-fold bebas leakage.
 - Menjamin alignment K-kolom probabilitas konsisten pada validasi/test saat terdapat kelas langka pada fold tertentu.
 
 ```python
@@ -233,8 +265,9 @@ cfg = TextConfig(
     target="label",
     metric="f1_macro",
     estimator="logistic",
-    clean_mode="aggressive",
-    tfidf_max_features=10000,
+    clean_mode="social_id",
+    emoji_mode="map",
+    max_features_word=50_000,
     n_folds=5,
 )
 pipe = TfidfPipeline(cfg)
@@ -243,12 +276,11 @@ result = pipe.run(train_df, test_df)
 
 ### C. TransformerPipeline (Deep Learning Offline)
 
-`TransformerPipeline` mendukung fine-tuning model HuggingFace lokal (PyTorch) secara offline:
-- **Offline Guard:** `validate_local_model_dir` memeriksa kelengkapan file weights dan tokenizer secara instan sebelum training dimulai.
-- **Backbone Freezing:** Opsi `freeze_backbone=True` dan `unfreeze_last_n_layers` untuk pelatihan cepat atau transfer learning.
-- **Dynamic Batch Collator:** Padding dinamis per-batch (`make_dynamic_collator`) menghemat VRAM hingga ~40% dibandingkan static max_length.
-- **Precision:** Mendukung `"fp32"`, `"fp16"`, dan `"bf16"` (menggunakan `torch.amp.autocast`).
-- **Emergency Truncation & Profiling:** Batch profiling otomatis memprediksi runtime per fold.
+`TransformerPipeline` mendukung fine-tuning model HuggingFace lokal (PyTorch) secara offline (lihat detail Model Cards & batas VRAM RTX 3070 8GB di **[`docs/offline_models.md`](docs/offline_models.md)**):
+- **Offline Guard:** `validate_local_model_dir` memeriksa kelengkapan `config.json`, file tokenizer, dan file weights secara instan sebelum training dimulai.
+- **Dynamic Batch Collator:** Padding dinamis per-batch (`make_dynamic_collator`) menghemat VRAM secara signifikan dibandingkan static `max_length`.
+- **Precision:** Mendukung `"auto"`, `"fp32"`, `"fp16"`, dan `"bf16"` (menggunakan `torch.amp.autocast`).
+- **Two-Tier Time Guard:** Estimasi durasi fold otomatis (`estimate_fold_seconds`) dan cutoff darurat antar-epoch jika melewati `max_minutes`.
 
 ```python
 from utils.text import TextConfig, TransformerPipeline
@@ -258,13 +290,13 @@ cfg = TextConfig(
     task="multiclass",
     target="category",
     metric="f1_macro",
-    model_name_or_path="models/indobert-base-p1",  # Direktori lokal
+    model_name_or_path="assets/models/indobert-base-p1",  # Direktori lokal
     local_files_only=True,
-    max_length=128,
-    train_batch_size=16,
+    max_length=256,
+    train_batch_size=16,      # Gunakan 8 + grad_accum_steps=2 untuk mdeberta-v3-base
     eval_batch_size=32,
-    gradient_accumulation_steps=2,
-    precision="fp16",
+    grad_accum_steps=1,
+    precision="auto",
     epochs=3,
     n_folds=5,
 )
@@ -312,6 +344,28 @@ from utils.text import extract_top_errors
 
 err_df = extract_top_errors(result, train_df, n=20)
 # Menyimpan hasil otomatis ke <run_dir>/error_analysis.csv
+```
+
+### F. Fast EDA (`quick_text_eda` & CLI)
+
+Lakukan audit kilat dataset teks di menit-menit awal lomba untuk mendapatkan ringkasan statistik teks, deteksi noise sosmed/emoji, imbalance target, dan rekomendasi otomatis parameter `clean_mode`, `emoji_mode`, serta `max_length`:
+
+```python
+from utils.text import quick_text_eda
+
+eda = quick_text_eda(
+    train_df=train_df,
+    test_df=test_df,
+    text_cols=["text"],
+    target="label",
+    verbose=True,
+)
+# eda["recommendations"] -> {'clean_mode': 'social_id', 'emoji_mode': 'compare_keep_strip_map', 'max_length': 192}
+```
+
+Tersedia juga standalone CLI script untuk inspeksi via terminal atau ekspor laporan JSON:
+```bash
+python scripts/quick_eda.py --train train.csv --test test.csv --text-cols text --target label --out eda.json
 ```
 
 ---
